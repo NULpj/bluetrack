@@ -1,14 +1,16 @@
 name: Android CI
 
 on:
-  pull_request:
   push:
+    branches:
+      - main
+  pull_request:
     branches:
       - main
 
 jobs:
   build:
-    name: Build and test
+    name: Build and Test
     runs-on: ubuntu-latest
 
     defaults:
@@ -16,43 +18,82 @@ jobs:
         working-directory: android
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 17
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle' # Menghemat waktu build dengan cache
 
-      - name: Ensure Gradle wrapper is executable
+      - name: Make Gradle Wrapper Executable
         run: chmod +x ./gradlew
 
-      - name: Lint Kotlin (ktlint)
+      - name: Check Kotlin Lint (ktlint)
         run: ./gradlew :app:ktlintCheck
 
-      - name: Run unit tests
+      - name: Run Unit Tests
         run: ./gradlew testDebugUnitTest
 
-      - name: Assemble debug APK
+      - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Assemble release APK (R8 minify, with ProGuard keep rules)
+      - name: Build Release APK
         run: ./gradlew assembleRelease
 
-      - name: Verify BouncyCastle + Bluetrack protocol classes survived R8
+      - name: Verify BouncyCastle + Bluetrack Protocol Classes (R8 Keep Rules)
         run: |
           set -euo pipefail
-          apk="app/build/outputs/apk/release/app-release-unsigned.apk"
-          test -f "$apk"
-          # Collect every classes*.dex out of the APK and grep symbols.
-          tmp="$(mktemp -d)"
-          unzip -j -q "$apk" 'classes*.dex' -d "$tmp"
-          for sym in rfc7748 rfc8032 FeedbackSession FeedbackHandshakePayload PayloadDecryptor TrustedHostStore; do
-            if ! strings -a "$tmp"/classes*.dex | grep -q "$sym"; then
-              echo "FAIL: '$sym' not found in any classes*.dex of $apk"
-              exit 1
+          
+          APK_PATH="app/build/outputs/apk/release/app-release-unsigned.apk"
+          
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK tidak ditemukan di $APK_PATH"
+            exit 1
+          fi
+          
+          TMP_DIR=$(mktemp -d)
+          unzip -j -q "$APK_PATH" 'classes*.dex' -d "$TMP_DIR"
+          
+          SYMBOLS=(
+            "rfc7748"
+            "rfc8032"
+            "FeedbackSession"
+            "FeedbackHandshakePayload"
+            "PayloadDecryptor"
+            "TrustedHostStore"
+          )
+          
+          FAILED=0
+          for sym in "${SYMBOLS[@]}"; do
+            if ! strings -a "$TMP_DIR"/classes*.dex | grep -qF "$sym"; then
+              echo "❌ FAIL: '$sym' hilang atau terhapus oleh R8 di $APK_PATH"
+              FAILED=1
+            else
+              echo "✅ OK: '$sym' aman dan terverifikasi"
             fi
-            echo "ok  '$sym' present"
           done
-          rm -rf "$tmp"
+          
+          rm -rf "$TMP_DIR"
+          
+          if [ $FAILED -ne 0 ]; then
+            exit 1
+          fi
+
+      # 1. Upload Debug APK
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7 # Menyimpan file selama 7 hari sebelum otomatis dihapus
+
+      # 2. Upload Release APK (Unsigned)
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 7
